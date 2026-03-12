@@ -20,5 +20,25 @@
       "lastUpdated": "2026-01-01"
     }
   ],
-  "slaveAccounts": []
+  "slaveAccounts": [
+    {
+      "id": "s101",
+      "name": "Slave Account Name",
+      "accountNumber": "87654321",
+      "masterPass": "your-mt5-password",
+      "broker": "BrokerName-Live",
+      "mt5Path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+      "currency": "USD",
+      "masterId": "m100",
+      "balance": 0,
+      "equity": 0,
+      "margin": 0,
+      "freeMargin": 0,
+      "pnl": 0,
+      "totalPnl": 0,
+      "active": true,
+      "createdAt": "2026-01-01",
+      "lastUpdated": "2026-01-01"
+    }
+  ]
 }

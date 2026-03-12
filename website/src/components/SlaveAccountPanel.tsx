@@ -20,6 +20,7 @@ export interface SlaveAccount {
   totalPnl: number;
   mtStatus?: "connected" | "disconnected" | "error" | "connecting";
   mtMessage?: string;
+  active?: boolean;
   createdAt: string;
   lastUpdated: string;
 }
@@ -116,6 +117,15 @@ const SlaveAccountPanel = ({
     if (!masterId || !onManualCommand || !manualReady) return;
     if (requiresLot && !lotValid) return;
     onManualCommand(masterId, type, requiresLot ? numericLot : undefined);
+  };
+
+  const toggleActive = async (account: SlaveAccount) => {
+    const next = account.active === false ? true : false;
+    await fetch(`/api/slaves/${account.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: next }),
+    });
   };
 
   const openEdit = (account: SlaveAccount) => {
@@ -284,13 +294,25 @@ const SlaveAccountPanel = ({
                       <p className="text-[10px] text-muted-foreground">{account.broker} · {account.accountNumber}</p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => openEdit(account)}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-muted"
-                    title="Edit account"
-                  >
-                    <Pencil className="w-3 h-3 text-muted-foreground" />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => toggleActive(account)}
+                      className={`text-[10px] px-2 py-0.5 rounded-full font-medium border transition-colors
+                        ${account.active !== false
+                          ? "bg-green-500/20 text-green-400 border-green-500/30 hover:bg-green-500/30"
+                          : "bg-zinc-700 text-zinc-400 border-zinc-600 hover:bg-zinc-600"}`}
+                      title={account.active !== false ? "Click to deactivate" : "Click to activate"}
+                    >
+                      {account.active !== false ? "Active" : "Inactive"}
+                    </button>
+                    <button
+                      onClick={() => openEdit(account)}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-muted"
+                      title="Edit account"
+                    >
+                      <Pencil className="w-3 h-3 text-muted-foreground" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Stats grid */}

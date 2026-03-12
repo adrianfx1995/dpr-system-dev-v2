@@ -213,6 +213,76 @@ function sendToSlavesByMaster(tag, masterId, obj) {
     return sent;
 }
 
+// Smart lot distributor — respects active flag and splits lots evenly when possible.
+// For close/reduce ops: always sends to ALL connected slaves (they may hold copies from before deactivation).
+// For open ops: only active slaves; splits lot evenly if divisible at 0.01 step, otherwise highest-equity slave takes full lot.
+function distributeCopy(tag, masterId, payload) {
+    const LOT_STEP = 0.01;
+    const t = (tag || '').toUpperCase();
+    const set = clientsByTag.get(t);
+    if (!set || set.size === 0) return 0;
+
+    const connected = [];
+    set.forEach((sock) => {
+        if (!sock || sock.destroyed) { removeSocket(sock); return; }
+        const bind = bindBySocket.get(sock);
+        if (!bind || bind.kind !== 'slave') return;
+        if (String(bind.masterId || '') !== String(masterId || '')) return;
+        connected.push({ sock, id: bind.id });
+    });
+    if (connected.length === 0) return 0;
+
+    const op = payload.op;
+    const totalLot = parseFloat(payload.lot || 0);
+
+    // close/reduce → all connected slaves regardless of active status
+    if (op !== 'open' || !totalLot) {
+        const raw = JSON.stringify(payload) + '\n';
+        let sent = 0;
+        connected.forEach(({ sock }) => {
+            try { sock.write(raw); sent++; }
+            catch (_e) { removeSocket(sock); try { sock.destroy(); } catch {} }
+        });
+        return sent;
+    }
+
+    // open → only active slaves
+    const db = readDb();
+    const active = connected
+        .filter(({ id }) => {
+            const rec = db.slaveAccounts.find((s) => s.id === id);
+            return !rec || rec.active !== false; // default active if field missing
+        })
+        .map(({ sock, id }) => {
+            const rec = db.slaveAccounts.find((s) => s.id === id);
+            return { sock, id, equity: rec ? (rec.equity || 0) : 0 };
+        });
+
+    if (active.length === 0) return 0;
+
+    const n = active.length;
+    const perSlave = Math.round((totalLot / n) / LOT_STEP) * LOT_STEP;
+    const splitTotal = Math.round(perSlave * n * 100) / 100;
+
+    let assignments;
+    if (Math.abs(splitTotal - totalLot) < 0.001 && perSlave >= LOT_STEP) {
+        // even split works
+        assignments = active.map((s) => ({ sock: s.sock, lot: perSlave }));
+    } else {
+        // cannot split evenly → highest equity slave takes full lot
+        const sorted = [...active].sort((a, b) => b.equity - a.equity);
+        assignments = [{ sock: sorted[0].sock, lot: totalLot }];
+    }
+
+    let sent = 0;
+    assignments.forEach(({ sock, lot }) => {
+        const p = JSON.stringify({ ...payload, lot }) + '\n';
+        try { sock.write(p); sent++; }
+        catch (_e) { removeSocket(sock); try { sock.destroy(); } catch {} }
+    });
+    return sent;
+}
+
 // Send to every connected EA regardless of tag
 // eslint-disable-next-line no-unused-vars
 function broadcastAll(obj) {
@@ -475,7 +545,7 @@ tcpServer.on('connection', (socket) => {
                     }
                     const sourceMasterId = bind.id || json.masterId;
                     const payload = { ...json, masterId: sourceMasterId };
-                    const sent = sendToSlavesByMaster(tag, sourceMasterId, payload);
+                    const sent = distributeCopy(tag, sourceMasterId, payload);
                     console.log(`[COPY] tag=${tag} from=${sourceMasterId || clientId} sent_to_slaves=${sent} payload=${JSON.stringify(payload)}`);
                 } catch (e) {
                     console.log(`[TCP] Bad SIGNAL from ${clientId}: ${e.message}`);
