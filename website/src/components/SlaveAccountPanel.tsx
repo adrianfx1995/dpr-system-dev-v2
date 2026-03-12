@@ -119,13 +119,9 @@ const SlaveAccountPanel = ({
     onManualCommand(masterId, type, requiresLot ? numericLot : undefined);
   };
 
-  const toggleActive = async (account: SlaveAccount) => {
+  const toggleActive = (account: SlaveAccount) => {
     const next = account.active === false ? true : false;
-    await fetch(`/api/slaves/${account.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ active: next }),
-    });
+    onEdit(account.id, { active: next });
   };
 
   const openEdit = (account: SlaveAccount) => {

@@ -213,72 +213,208 @@ function sendToSlavesByMaster(tag, masterId, obj) {
     return sent;
 }
 
-// Smart lot distributor — respects active flag and splits lots evenly when possible.
-// For close/reduce ops: always sends to ALL connected slaves (they may hold copies from before deactivation).
-// For open ops: only active slaves; splits lot evenly if divisible at 0.01 step, otherwise highest-equity slave takes full lot.
+const copyAllocations = new Map(); // masterId -> masterTicket -> slaveId -> allocated lot
+const LOT_EPS = 1e-8;
+
+function roundLot(value) {
+    return Math.round((Number(value) || 0) * 1e8) / 1e8;
+}
+
+function getAllocationMap(masterId, masterTicket, create = false) {
+    const mKey = String(masterId || '');
+    const tKey = String(masterTicket || '');
+    if (!mKey || !tKey) return null;
+    let byTicket = copyAllocations.get(mKey);
+    if (!byTicket) {
+        if (!create) return null;
+        byTicket = new Map();
+        copyAllocations.set(mKey, byTicket);
+    }
+    let bySlave = byTicket.get(tKey);
+    if (!bySlave) {
+        if (!create) return null;
+        bySlave = new Map();
+        byTicket.set(tKey, bySlave);
+    }
+    return bySlave;
+}
+
+function addAllocation(masterId, masterTicket, slaveId, lot) {
+    const bySlave = getAllocationMap(masterId, masterTicket, true);
+    if (!bySlave) return;
+    const key = String(slaveId || '');
+    if (!key) return;
+    const prev = roundLot(bySlave.get(key) || 0);
+    bySlave.set(key, roundLot(prev + lot));
+}
+
+function reduceAllocation(masterId, masterTicket, slaveId, lot) {
+    const bySlave = getAllocationMap(masterId, masterTicket, false);
+    if (!bySlave) return;
+    const key = String(slaveId || '');
+    if (!key) return;
+    const prev = roundLot(bySlave.get(key) || 0);
+    const next = roundLot(prev - lot);
+    if (next <= LOT_EPS) bySlave.delete(key);
+    else bySlave.set(key, next);
+
+    if (bySlave.size === 0) {
+        const mKey = String(masterId || '');
+        const tKey = String(masterTicket || '');
+        const byTicket = copyAllocations.get(mKey);
+        if (!byTicket) return;
+        byTicket.delete(tKey);
+        if (byTicket.size === 0) copyAllocations.delete(mKey);
+    }
+}
+
+function clearAllocation(masterId, masterTicket) {
+    const mKey = String(masterId || '');
+    const tKey = String(masterTicket || '');
+    if (!mKey || !tKey) return;
+    const byTicket = copyAllocations.get(mKey);
+    if (!byTicket) return;
+    byTicket.delete(tKey);
+    if (byTicket.size === 0) copyAllocations.delete(mKey);
+}
+
+function getAllocationEntries(masterId, masterTicket) {
+    const bySlave = getAllocationMap(masterId, masterTicket, false);
+    if (!bySlave) return [];
+    return Array.from(bySlave.entries()).map(([slaveId, lot]) => [String(slaveId), roundLot(lot)]);
+}
+
+function writePayload(sock, payloadObj) {
+    try {
+        sock.write(JSON.stringify(payloadObj) + '\n');
+        return true;
+    } catch (_e) {
+        removeSocket(sock);
+        try { sock.destroy(); } catch {}
+        return false;
+    }
+}
+
+// Smart lot distributor:
+// open   -> only active slaves, split equally if possible, else highest-equity active slave gets full lot
+// reduce -> routed by tracked ticket allocation to avoid over-closing split copies
+// close  -> routed by tracked ticket allocation (fallback to all if unknown)
+// other  -> forwarded to all connected slaves (e.g., snapshots)
 function distributeCopy(tag, masterId, payload) {
     const LOT_STEP = 0.01;
     const t = (tag || '').toUpperCase();
     const set = clientsByTag.get(t);
     if (!set || set.size === 0) return 0;
 
-    const connected = [];
+    const db = readDb();
+    const connectedById = new Map();
     set.forEach((sock) => {
         if (!sock || sock.destroyed) { removeSocket(sock); return; }
         const bind = bindBySocket.get(sock);
         if (!bind || bind.kind !== 'slave') return;
         if (String(bind.masterId || '') !== String(masterId || '')) return;
-        connected.push({ sock, id: bind.id });
+        connectedById.set(String(bind.id || ''), sock);
     });
+
+    const connected = Array.from(connectedById.entries()).map(([id, sock]) => {
+        const rec = db.slaveAccounts.find((s) => String(s.id) === id);
+        return {
+            sock,
+            id,
+            active: !rec || rec.active !== false, // default active if field missing
+            equity: rec ? Number(rec.equity || 0) : 0,
+        };
+    }).filter((x) => x.id);
     if (connected.length === 0) return 0;
 
-    const op = payload.op;
-    const totalLot = parseFloat(payload.lot || 0);
+    const op = String(payload?.op || '').toLowerCase();
+    const parsedLot = parseFloat(payload?.lot || 0);
+    const totalLot = Number.isFinite(parsedLot) ? roundLot(parsedLot) : 0;
+    const masterTicket = payload?.masterTicket !== undefined && payload?.masterTicket !== null
+        ? String(payload.masterTicket)
+        : '';
 
-    // close/reduce → all connected slaves regardless of active status
-    if (op !== 'open' || !totalLot) {
-        const raw = JSON.stringify(payload) + '\n';
+    if (op === 'open' && totalLot > LOT_EPS) {
+        const active = connected.filter((s) => s.active);
+        if (active.length === 0) return 0;
+
+        const n = active.length;
+        const perSlave = Math.round((totalLot / n) / LOT_STEP) * LOT_STEP;
+        const splitTotal = Math.round(perSlave * n * 100) / 100;
+
+        let assignments;
+        if (Math.abs(splitTotal - totalLot) < 0.001 && perSlave >= LOT_STEP) {
+            assignments = active.map((s) => ({ sock: s.sock, id: s.id, lot: perSlave }));
+        } else {
+            const sorted = [...active].sort((a, b) => b.equity - a.equity);
+            assignments = [{ sock: sorted[0].sock, id: sorted[0].id, lot: totalLot }];
+        }
+
         let sent = 0;
-        connected.forEach(({ sock }) => {
-            try { sock.write(raw); sent++; }
-            catch (_e) { removeSocket(sock); try { sock.destroy(); } catch {} }
+        assignments.forEach(({ sock, id, lot }) => {
+            const lotValue = roundLot(lot);
+            if (lotValue <= LOT_EPS) return;
+            if (writePayload(sock, { ...payload, lot: lotValue })) {
+                sent++;
+                if (masterTicket) addAllocation(masterId, masterTicket, id, lotValue);
+            }
         });
         return sent;
     }
 
-    // open → only active slaves
-    const db = readDb();
-    const active = connected
-        .filter(({ id }) => {
-            const rec = db.slaveAccounts.find((s) => s.id === id);
-            return !rec || rec.active !== false; // default active if field missing
-        })
-        .map(({ sock, id }) => {
-            const rec = db.slaveAccounts.find((s) => s.id === id);
-            return { sock, id, equity: rec ? (rec.equity || 0) : 0 };
-        });
+    if (op === 'reduce' && totalLot > LOT_EPS) {
+        const allocations = masterTicket ? getAllocationEntries(masterId, masterTicket) : [];
+        let sent = 0;
+        let remaining = totalLot;
 
-    if (active.length === 0) return 0;
+        if (allocations.length > 0) {
+            const holders = allocations
+                .map(([slaveId, lot]) => ({
+                    slaveId,
+                    lot,
+                    sock: connectedById.get(slaveId) || null,
+                }))
+                .filter((h) => h.sock && h.lot > LOT_EPS)
+                .sort((a, b) => b.lot - a.lot);
 
-    const n = active.length;
-    const perSlave = Math.round((totalLot / n) / LOT_STEP) * LOT_STEP;
-    const splitTotal = Math.round(perSlave * n * 100) / 100;
+            holders.forEach((h) => {
+                if (remaining <= LOT_EPS) return;
+                const lotValue = roundLot(Math.min(remaining, h.lot));
+                if (lotValue <= LOT_EPS) return;
+                if (writePayload(h.sock, { ...payload, lot: lotValue })) {
+                    sent++;
+                    remaining = roundLot(remaining - lotValue);
+                    reduceAllocation(masterId, masterTicket, h.slaveId, lotValue);
+                }
+            });
+            return sent;
+        }
 
-    let assignments;
-    if (Math.abs(splitTotal - totalLot) < 0.001 && perSlave >= LOT_STEP) {
-        // even split works
-        assignments = active.map((s) => ({ sock: s.sock, lot: perSlave }));
-    } else {
-        // cannot split evenly → highest equity slave takes full lot
-        const sorted = [...active].sort((a, b) => b.equity - a.equity);
-        assignments = [{ sock: sorted[0].sock, lot: totalLot }];
+        // Fallback for pre-existing tickets without known allocation history.
+        const sorted = [...connected].sort((a, b) => b.equity - a.equity);
+        if (sorted[0] && writePayload(sorted[0].sock, { ...payload, lot: totalLot })) {
+            sent++;
+        }
+        return sent;
+    }
+
+    if (op === 'close') {
+        const allocations = masterTicket ? getAllocationEntries(masterId, masterTicket) : [];
+        if (allocations.length > 0) {
+            let sent = 0;
+            allocations.forEach(([slaveId]) => {
+                const sock = connectedById.get(slaveId);
+                if (!sock) return;
+                if (writePayload(sock, payload)) sent++;
+            });
+            clearAllocation(masterId, masterTicket);
+            return sent;
+        }
     }
 
     let sent = 0;
-    assignments.forEach(({ sock, lot }) => {
-        const p = JSON.stringify({ ...payload, lot }) + '\n';
-        try { sock.write(p); sent++; }
-        catch (_e) { removeSocket(sock); try { sock.destroy(); } catch {} }
+    connected.forEach(({ sock }) => {
+        if (writePayload(sock, payload)) sent++;
     });
     return sent;
 }
@@ -911,3 +1047,4 @@ function shutdownAll() {
 }
 process.on('SIGINT',  () => { shutdownAll(); process.exit(0); });
 process.on('SIGTERM', () => { shutdownAll(); process.exit(0); });
+
