@@ -15,10 +15,6 @@ import urllib.request
 API_BASE = os.environ.get("DPR_API_BASE", "http://localhost:3001")
 ENGINE_HOST = os.environ.get("DPR_ENGINE_HOST", "127.0.0.1")
 ENGINE_PORT = int(os.environ.get("DPR_ENGINE_PORT", "9090"))
-DEFAULT_MT5_PATH = os.environ.get(
-    "DPR_MASTER_MT5_PATH",
-    r"C:\Program Files\Wingo Group Ltd MT5 Terminal\terminal64.exe",
-)
 POLL_SECONDS = int(os.environ.get("DPR_MASTER_POLL_SECONDS", "10"))
 
 RUNNING = True
@@ -42,7 +38,9 @@ def normalize_master(master):
     if not master_id or not account or not password or not server:
         return None
 
-    mt5_path = str(master.get("mt5Path") or DEFAULT_MT5_PATH).strip() or DEFAULT_MT5_PATH
+    mt5_path = str(master.get("mt5Path") or "").strip()
+    if not mt5_path:
+        return None
     return {
         "master_id": str(master_id),
         "account": account,
@@ -97,7 +95,7 @@ def main():
     children = {}  # master_id => {proc, cfg}
 
     print(f"[MASTER-MANAGER] API={API_BASE} ENGINE={ENGINE_HOST}:{ENGINE_PORT}")
-    print(f"[MASTER-MANAGER] default_mt5_path={DEFAULT_MT5_PATH}")
+    print("[MASTER-MANAGER] mt5_path_source=db.masterAccounts[].mt5Path")
 
     while RUNNING:
         try:
@@ -151,4 +149,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

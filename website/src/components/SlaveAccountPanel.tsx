@@ -1,10 +1,9 @@
 import { useState } from "react";
-import { Link2, Circle, ArrowUpRight, ArrowDownRight, Users, Pencil, Wifi, WifiOff, AlertTriangle, Loader } from "lucide-react";
+import { Link2, ArrowUpRight, ArrowDownRight, Users, Pencil, Wifi, WifiOff, AlertTriangle, Loader } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export interface SlaveAccount {
   id: string;
@@ -19,28 +18,22 @@ export interface SlaveAccount {
   equity: number;
   pnl: number;
   totalPnl: number;
-  copyRatio: number;
-  status: "synced" | "pending" | "error";
   mtStatus?: "connected" | "disconnected" | "error" | "connecting";
   mtMessage?: string;
   createdAt: string;
   lastUpdated: string;
 }
 
-const SLOT_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD"];
+type MasterMode = "manual" | "automated";
 
 interface SlaveAccountPanelProps {
   accounts: SlaveAccount[];
+  masterId: string | null;
   masterName: string | null;
+  masterMode?: MasterMode;
+  onMasterModeChange?: (masterId: string, mode: MasterMode) => void;
   onEdit: (id: string, updates: Partial<SlaveAccount>) => void;
-  assignedSymbols?: Record<string, string>;
 }
-
-const statusConfig = {
-  synced: { label: "Synced", color: "text-badge-success", bg: "bg-badge-success/10" },
-  pending: { label: "Pending", color: "text-badge-warning", bg: "bg-badge-warning/10" },
-  error: { label: "Error", color: "text-destructive", bg: "bg-destructive/10" },
-};
 
 function SlaveMt5Badge({ status, message }: { status?: string; message?: string }) {
   if (!status || status === "disconnected") {
@@ -75,9 +68,26 @@ function SlaveMt5Badge({ status, message }: { status?: string; message?: string 
   );
 }
 
-const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} }: SlaveAccountPanelProps) => {
+const SlaveAccountPanel = ({
+  accounts,
+  masterId,
+  masterName,
+  masterMode,
+  onMasterModeChange,
+  onEdit,
+}: SlaveAccountPanelProps) => {
   const [editAccount, setEditAccount] = useState<SlaveAccount | null>(null);
   const [form, setForm] = useState<Partial<SlaveAccount>>({});
+  const [pathCheck, setPathCheck] = useState<{ status: "idle" | "checking" | "ok" | "missing" | "error"; message: string }>({
+    status: "idle",
+    message: "",
+  });
+  const resolvedMasterMode: MasterMode = masterMode === "automated" ? "automated" : "manual";
+
+  const updateMode = (mode: MasterMode) => {
+    if (!masterId || !onMasterModeChange || resolvedMasterMode === mode) return;
+    onMasterModeChange(masterId, mode);
+  };
 
   const openEdit = (account: SlaveAccount) => {
     setEditAccount(account);
@@ -86,21 +96,52 @@ const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} 
       accountNumber: account.accountNumber,
       masterPass: account.masterPass,
       broker: account.broker,
-      mt5Path: account.mt5Path,
-      copyRatio: account.copyRatio,
-      status: account.status,
+      mt5Path: account.mt5Path ?? "",
     });
+    setPathCheck({ status: "idle", message: "" });
   };
 
   const handleSave = () => {
     if (editAccount) {
-      onEdit(editAccount.id, form);
+      const mt5Path = String(form.mt5Path || "").trim();
+      if (!mt5Path) return;
+      onEdit(editAccount.id, { ...form, mt5Path });
       setEditAccount(null);
+      setPathCheck({ status: "idle", message: "" });
     }
   };
 
-  const setField = (field: keyof SlaveAccount) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setForm((prev) => ({ ...prev, [field]: field === "copyRatio" ? parseFloat(e.target.value) : e.target.value }));
+  const setField = (field: keyof SlaveAccount) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setForm((prev) => ({ ...prev, [field]: e.target.value }));
+    if (field === "mt5Path") setPathCheck({ status: "idle", message: "" });
+  };
+
+  const checkPath = async () => {
+    const mt5Path = String(form.mt5Path || "").trim();
+    if (!mt5Path) {
+      setPathCheck({ status: "error", message: "Enter MT5 terminal path first." });
+      return;
+    }
+
+    setPathCheck({ status: "checking", message: "Checking path on engine host..." });
+    try {
+      const res = await fetch("/api/mt5-path/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mt5Path }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || "Failed to check path");
+
+      if (body.exists) {
+        setPathCheck({ status: "ok", message: "Path found on engine host." });
+      } else {
+        setPathCheck({ status: "missing", message: "Path not found on engine host." });
+      }
+    } catch (e) {
+      setPathCheck({ status: "error", message: e instanceof Error ? e.message : "Failed to check MT5 path." });
+    }
+  };
 
   if (!masterName) {
     return (
@@ -124,13 +165,39 @@ const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} 
         <p className="text-xs text-muted-foreground">
           Linked to <span className="text-primary font-medium">{masterName}</span> · {accounts.length} accounts
         </p>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card/60 px-3 py-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Execution Mode</span>
+          <div className="inline-flex items-center rounded-md border border-border bg-background p-0.5">
+            <Button
+              type="button"
+              size="sm"
+              variant={resolvedMasterMode === "manual" ? "default" : "ghost"}
+              className="h-7 px-2 text-[11px]"
+              onClick={() => updateMode("manual")}
+            >
+              Manual
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={resolvedMasterMode === "automated" ? "default" : "ghost"}
+              className="h-7 px-2 text-[11px]"
+              onClick={() => updateMode("automated")}
+            >
+              Automated
+            </Button>
+          </div>
+        </div>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          {resolvedMasterMode === "automated"
+            ? "Automated mode selected. Automation behavior will be connected in a later update."
+            : "Manual mode is active by default."}
+        </p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 sm:p-4">
         <div className="grid gap-2 sm:gap-3 grid-cols-1 lg:grid-cols-2">
           {accounts.map((account) => {
-            const st = statusConfig[account.status];
-            const symbol = assignedSymbols[account.id];
             return (
               <div
                 key={account.id}
@@ -147,26 +214,15 @@ const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} 
                     <div>
                       <p className="text-xs sm:text-sm font-semibold">{account.name}</p>
                       <p className="text-[10px] text-muted-foreground">{account.broker} · {account.accountNumber}</p>
-                      {symbol && (
-                        <span className="inline-block mt-0.5 text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-primary/10 text-primary">
-                          {symbol}
-                        </span>
-                      )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => openEdit(account)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-muted"
-                      title="Edit account"
-                    >
-                      <Pencil className="w-3 h-3 text-muted-foreground" />
-                    </button>
-                    <span className={`text-[10px] uppercase tracking-wider font-medium px-2 py-1 rounded-full ${st.color} ${st.bg}`}>
-                      <Circle className="w-1.5 h-1.5 fill-current inline mr-1" />
-                      {st.label}
-                    </span>
-                  </div>
+                  <button
+                    onClick={() => openEdit(account)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-muted"
+                    title="Edit account"
+                  >
+                    <Pencil className="w-3 h-3 text-muted-foreground" />
+                  </button>
                 </div>
 
                 {/* Stats grid */}
@@ -195,11 +251,6 @@ const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} 
                   </div>
                 </div>
 
-                {/* Footer */}
-                <div className="mt-2 pt-2 border-t border-border flex items-center justify-between">
-                  <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Copy Ratio</span>
-                  <span className="text-[10px] font-semibold font-mono">{account.copyRatio}x</span>
-                </div>
                 <div className="mt-2">
                   <SlaveMt5Badge status={account.mtStatus} message={account.mtMessage} />
                 </div>
@@ -215,7 +266,15 @@ const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} 
       </div>
 
       {/* Edit Dialog */}
-      <Dialog open={!!editAccount} onOpenChange={(open) => !open && setEditAccount(null)}>
+      <Dialog
+        open={!!editAccount}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditAccount(null);
+            setPathCheck({ status: "idle", message: "" });
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Slave Account</DialogTitle>
@@ -238,25 +297,26 @@ const SlaveAccountPanel = ({ accounts, masterName, onEdit, assignedSymbols = {} 
               <Input value={form.broker ?? ""} onChange={setField("broker")} />
             </div>
             <div className="space-y-1.5">
-              <Label>MT5 Terminal Path (Optional)</Label>
+              <Label>MT5 Terminal Path (Required)</Label>
               <Input value={form.mt5Path ?? ""} onChange={setField("mt5Path")} />
+              <div className="flex items-center justify-between gap-2">
+                <p
+                  className={`text-[11px] ${
+                    pathCheck.status === "ok"
+                      ? "text-badge-success"
+                      : pathCheck.status === "missing" || pathCheck.status === "error"
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                  }`}
+                >
+                  {pathCheck.message || "Each account must have a unique MT5 path."}
+                </p>
+                <Button type="button" variant="outline" size="sm" onClick={checkPath} disabled={pathCheck.status === "checking"}>
+                  {pathCheck.status === "checking" ? "Checking..." : "Check Path"}
+                </Button>
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label>Copy Ratio</Label>
-              <Input type="number" step="0.01" min="0" max="1" value={form.copyRatio ?? ""} onChange={setField("copyRatio")} />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Status</Label>
-              <Select value={form.status} onValueChange={(v) => setForm((p) => ({ ...p, status: v as SlaveAccount["status"] }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="synced">Synced</SelectItem>
-                  <SelectItem value="pending">Pending</SelectItem>
-                  <SelectItem value="error">Error</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <Button onClick={handleSave} className="w-full">Save Changes</Button>
+            <Button onClick={handleSave} className="w-full" disabled={!String(form.mt5Path || "").trim()}>Save Changes</Button>
           </div>
         </DialogContent>
       </Dialog>

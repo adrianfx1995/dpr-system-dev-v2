@@ -22,6 +22,13 @@ RECONNECT_BACKOFF = 5
 
 mt5_lock = threading.Lock()
 
+HEDGE_COMMENT_PREFIX = "RG:"
+_slave_hedge_lock = threading.Lock()
+_slave_hedge_map = {}  # {(slaveId, slaveTicket): masterTicket}
+
+_pending_hedge_lock = threading.Lock()
+_pending_hedge_opens = set()  # {comment str} — hedge opens currently in-flight, prevents duplicates
+
 
 def tcp_send(sock, line):
     sock.sendall((line.strip() + "\n").encode("utf-8"))
@@ -163,6 +170,94 @@ def normalize_volume(symbol_info, volume):
     return round(v, min(digits, 8))
 
 
+def open_slave_hedge(symbol, action, lot, comment, slave_id_src, slave_ticket, instance_id):
+    """Open an opposite-direction hedge on master for a slave-originated position."""
+    result = None
+    try:
+        with mt5_lock:
+            if not mt5.symbol_select(symbol, True):
+                print(f"[{instance_id}] HEDGE_OPEN symbol_select failed for {symbol}")
+                return
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                print(f"[{instance_id}] HEDGE_OPEN no symbol info for {symbol}")
+                return
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                print(f"[{instance_id}] HEDGE_OPEN no tick for {symbol}")
+                return
+            vol = normalize_volume(info, lot)
+            if vol <= 0:
+                print(f"[{instance_id}] HEDGE_OPEN invalid volume for {symbol} lot={lot}")
+                return
+            order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
+            price = tick.ask if action == "BUY" else tick.bid
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": vol,
+                "type": order_type,
+                "price": price,
+                "magic": 5430,
+                "comment": comment,
+            }
+            result = order_send_with_fill_fallback(request)
+
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            print(f"[{instance_id}] HEDGE_OPEN_OK {action} {vol} {symbol} ticket={result.order} comment={comment}")
+            with _slave_hedge_lock:
+                _slave_hedge_map[(str(slave_id_src), int(slave_ticket))] = int(result.order)
+        else:
+            code = result.retcode if result else "none"
+            cmt = result.comment if result else ""
+            print(f"[{instance_id}] HEDGE_OPEN_FAIL {action} {vol} {symbol} code={code} {cmt}")
+    finally:
+        with _pending_hedge_lock:
+            _pending_hedge_opens.discard(comment)
+
+
+def close_slave_hedge(comment, instance_id):
+    """Close the master hedge position that matches the given comment."""
+    with mt5_lock:
+        positions = mt5.positions_get() or []
+        target = None
+        for p in positions:
+            if getattr(p, "comment", "") == comment:
+                target = p
+                break
+
+        if target is None:
+            print(f"[{instance_id}] HEDGE_CLOSE no position found comment={comment}")
+            return
+
+        is_buy = target.type == mt5.POSITION_TYPE_BUY
+        close_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+        tick = mt5.symbol_info_tick(target.symbol)
+        if tick is None:
+            print(f"[{instance_id}] HEDGE_CLOSE no tick for {target.symbol}")
+            return
+        price = tick.bid if is_buy else tick.ask
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": target.symbol,
+            "volume": float(target.volume),
+            "type": close_type,
+            "position": int(target.ticket),
+            "price": price,
+            "magic": 5430,
+            "comment": "RG:X",
+        }
+        result = order_send_with_fill_fallback(request)
+
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        print(f"[{instance_id}] HEDGE_CLOSE_OK ticket={target.ticket} comment={comment}")
+    else:
+        code = result.retcode if result else "none"
+        cmt = result.comment if result else ""
+        print(f"[{instance_id}] HEDGE_CLOSE_FAIL ticket={target.ticket} code={code} {cmt}")
+
+
 def close_master_position_by_ticket(ticket, volume_to_close, instance_id):
     with mt5_lock:
         positions = mt5.positions_get(ticket=int(ticket))
@@ -198,7 +293,7 @@ def close_master_position_by_ticket(ticket, volume_to_close, instance_id):
             "position": int(ticket),
             "price": price,
             "magic": 5430,
-            "comment": "DPR-SLAVE-CLOSE",
+            "comment": "EC",
         }
         result = order_send_with_fill_fallback(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -227,6 +322,54 @@ def start_listener(sock, stop_event, instance_id):
                         continue
                     try:
                         data = json.loads(line)
+                        if data.get("kind") == "slave_origin_open":
+                            slave_id_src = str(data.get("slaveId") or "")
+                            slave_ticket = int(data.get("slaveTicket") or 0)
+                            symbol = str(data.get("symbol") or "")
+                            action = str(data.get("action") or "").upper()
+                            lot = float(data.get("lot") or 0.01)
+                            hedge_action = "SELL" if action == "BUY" else "BUY"
+                            comment = f"{HEDGE_COMMENT_PREFIX}{slave_id_src}:{slave_ticket}"
+                            if slave_id_src and slave_ticket and symbol and action in ("BUY", "SELL"):
+                                # Atomic duplicate + in-flight guard
+                                with _pending_hedge_lock:
+                                    already_pending = comment in _pending_hedge_opens
+                                    if not already_pending:
+                                        _pending_hedge_opens.add(comment)
+                                if already_pending:
+                                    print(f"[{instance_id}] SLAVE_ORIGIN_OPEN in-flight, skipped comment={comment}")
+                                else:
+                                    # Also verify not already open in MT5
+                                    with mt5_lock:
+                                        existing = mt5.positions_get() or []
+                                        already_open = any(getattr(p, "comment", "") == comment for p in existing)
+                                    if already_open:
+                                        with _pending_hedge_lock:
+                                            _pending_hedge_opens.discard(comment)
+                                        print(f"[{instance_id}] SLAVE_ORIGIN_OPEN already in MT5, skipped comment={comment}")
+                                    else:
+                                        print(f"[{instance_id}] SLAVE_ORIGIN_OPEN slaveId={slave_id_src} ticket={slave_ticket} → hedge {hedge_action} {lot} {symbol}")
+                                        threading.Thread(
+                                            target=open_slave_hedge,
+                                            args=(symbol, hedge_action, lot, comment, slave_id_src, slave_ticket, instance_id),
+                                            daemon=True,
+                                        ).start()
+                            continue
+                        if data.get("kind") == "slave_origin_close":
+                            slave_id_src = str(data.get("slaveId") or "")
+                            slave_ticket = int(data.get("slaveTicket") or 0)
+                            comment = f"{HEDGE_COMMENT_PREFIX}{slave_id_src}:{slave_ticket}"
+                            if slave_id_src and slave_ticket:
+                                # Cancel any in-flight open for this position
+                                with _pending_hedge_lock:
+                                    _pending_hedge_opens.discard(comment)
+                                print(f"[{instance_id}] SLAVE_ORIGIN_CLOSE slaveId={slave_id_src} ticket={slave_ticket} → closing hedge")
+                                threading.Thread(
+                                    target=close_slave_hedge,
+                                    args=(comment, instance_id),
+                                    daemon=True,
+                                ).start()
+                            continue
                         if data.get("kind") == "slave_close":
                             ticket = int(data.get("masterTicket") or 0)
                             close_volume = data.get("closedVolume")
@@ -293,6 +436,9 @@ def start_reverse_copy_monitor(sock, stop_event, instance_id, master_id):
 
                 current = {}
                 for p in positions:
+                    # Exclude hedge positions — slaves must never copy or track them
+                    if (getattr(p, "comment", "") or "").startswith(HEDGE_COMMENT_PREFIX):
+                        continue
                     ticket = int(p.ticket)
                     current[ticket] = {
                         "type": int(p.type),

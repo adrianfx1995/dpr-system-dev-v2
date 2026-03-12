@@ -6,6 +6,7 @@
       "accountNumber": "12345678",
       "masterPass": "your-mt5-password",
       "broker": "BrokerName-Live",
+      "mt5Path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
       "currency": "USD",
       "balance": 0,
       "equity": 0,

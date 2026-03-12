@@ -52,7 +52,11 @@ const Index = () => {
     refetchInterval: 5000, // auto-refresh every 5 seconds
   });
 
-  const masters: MasterAccount[] = data?.masterAccounts ?? [];
+  const mastersRaw: MasterAccount[] = data?.masterAccounts ?? [];
+  const masters: MasterAccount[] = mastersRaw.map((master) => ({
+    ...master,
+    mode: master.mode === "automated" ? "automated" : "manual",
+  }));
   const slaves: SlaveAccount[] = data?.slaveAccounts ?? [];
   const mt5PathWarnings: Mt5PathWarnings = data?.mt5PathWarnings ?? {
     missingPaths: [],
@@ -105,6 +109,7 @@ const Index = () => {
         masterPass,
         broker: server,
         mt5Path: normalizedMt5Path,
+        mode: "manual",
         currency: "USD",
         balance: 0, equity: 0, margin: 0, freeMargin: 0,
         pnl: 0, totalPnl: 0,
@@ -175,7 +180,14 @@ const Index = () => {
   const handleEditMaster = (id: string, updates: Partial<MasterAccount>) => {
     const normalized = { ...updates };
     if (typeof normalized.mt5Path === "string") normalized.mt5Path = normalized.mt5Path.trim();
+    if (Object.prototype.hasOwnProperty.call(normalized, "mode")) {
+      normalized.mode = normalized.mode === "automated" ? "automated" : "manual";
+    }
     editMutation.mutate({ type: "master", id, updates: normalized });
+  };
+
+  const handleMasterModeChange = (id: string, mode: "manual" | "automated") => {
+    handleEditMaster(id, { mode });
   };
 
   const handleEditSlave = (id: string, updates: Partial<SlaveAccount>) => {
@@ -183,12 +195,6 @@ const Index = () => {
     if (typeof normalized.mt5Path === "string") normalized.mt5Path = normalized.mt5Path.trim();
     editMutation.mutate({ type: "slave", id, updates: normalized });
   };
-
-  const SLOT_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD"];
-  const assignedSymbols: Record<string, string> = {};
-  [...slaves].sort((a, b) => a.id.localeCompare(b.id)).forEach((s, i) => {
-    assignedSymbols[s.id] = SLOT_SYMBOLS[i % SLOT_SYMBOLS.length];
-  });
 
   const filteredSlaves = selectedMasterId ? slaves.filter((s) => s.masterId === selectedMasterId) : [];
   const selectedMaster = masters.find((m) => m.id === selectedMasterId);
@@ -264,9 +270,11 @@ const Index = () => {
         <div className="flex-1 min-h-0">
           <SlaveAccountPanel
             accounts={filteredSlaves}
+            masterId={selectedMaster?.id || null}
             masterName={selectedMaster?.name || null}
+            masterMode={selectedMaster?.mode}
+            onMasterModeChange={handleMasterModeChange}
             onEdit={handleEditSlave}
-            assignedSymbols={assignedSymbols}
           />
         </div>
       </div>

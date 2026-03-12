@@ -15,9 +15,6 @@ import urllib.request
 API_BASE = os.environ.get("DPR_API_BASE", "http://localhost:3001")
 ENGINE_HOST = os.environ.get("DPR_ENGINE_HOST", "127.0.0.1")
 ENGINE_PORT = int(os.environ.get("DPR_ENGINE_PORT", "9090"))
-DEFAULT_SYMBOL = os.environ.get("DPR_DEFAULT_SYMBOL", "XAUUSD")
-SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD"]
-DEFAULT_MT5_PATH = os.environ.get("DPR_DEFAULT_MT5_PATH", r"C:\Program Files\MetaTrader 5\terminal64.exe")
 POLL_SECONDS = int(os.environ.get("DPR_SLAVE_POLL_SECONDS", "10"))
 
 RUNNING = True
@@ -44,9 +41,9 @@ def normalize_slave(slave, active_masters):
     if not slave_id or not account or not password or not server or not route_tag:
         return None
 
-    mt5_path = (slave.get("mt5Path") or DEFAULT_MT5_PATH).strip()
-    symbol = (slave.get("symbol") or DEFAULT_SYMBOL).strip() or DEFAULT_SYMBOL
-
+    mt5_path = (slave.get("mt5Path") or "").strip()
+    if not mt5_path:
+        return None
     return {
         "slave_id": str(slave_id),
         "master_id": str(slave.get("masterId")),
@@ -54,7 +51,6 @@ def normalize_slave(slave, active_masters):
         "password": password,
         "server": server,
         "route_tag": route_tag,
-        "symbol": symbol,
         "mt5_path": mt5_path,
     }
 
@@ -76,8 +72,6 @@ def build_command(cfg):
         cfg["password"],
         "--server",
         cfg["server"],
-        "--symbol",
-        cfg["symbol"],
         "--mt5-path",
         cfg["mt5_path"],
         "--engine-host",
@@ -110,7 +104,7 @@ def main():
     children = {}  # slave_id => {proc, cfg}
 
     print(f"[SLAVE-MANAGER] API={API_BASE} ENGINE={ENGINE_HOST}:{ENGINE_PORT}")
-    print(f"[SLAVE-MANAGER] default_mt5_path={DEFAULT_MT5_PATH}")
+    print("[SLAVE-MANAGER] mt5_path_source=db.slaveAccounts[].mt5Path")
 
     while RUNNING:
         try:
@@ -126,10 +120,6 @@ def main():
                 cfg = normalize_slave(slave, active_masters)
                 if cfg:
                     desired[cfg["slave_id"]] = cfg
-
-            # Round-robin symbol assignment: sort by slave_id, assign XAUUSD/EURUSD/GBPUSD in turn
-            for i, slave_id in enumerate(sorted(desired.keys())):
-                desired[slave_id]["symbol"] = SYMBOLS[i % len(SYMBOLS)]
 
             current_ids = set(children.keys())
             desired_ids = set(desired.keys())

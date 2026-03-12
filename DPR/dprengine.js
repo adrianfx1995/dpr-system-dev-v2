@@ -26,6 +26,9 @@ const DB_PATH   = path.resolve(__dirname, '../website/server/db.json');
 function readDb()       { return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8')); }
 function writeDb(data)  { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8'); }
 function today()        { return new Date().toISOString().split('T')[0]; }
+function normalizeMasterMode(value) {
+    return String(value || '').toLowerCase() === 'automated' ? 'automated' : 'manual';
+}
 function normalizeMt5Path(value) {
     if (typeof value !== 'string') return '';
     const trimmed = value.trim();
@@ -555,7 +558,11 @@ app.post('/api/masters', (req, res) => {
         const code = validation.conflict ? 409 : 400;
         return res.status(code).json({ error: validation.error, conflict: validation.conflict || null });
     }
-    const master = { ...req.body, mt5Path: validation.mt5Path };
+    const master = {
+        ...req.body,
+        mt5Path: validation.mt5Path,
+        mode: normalizeMasterMode(req.body?.mode),
+    };
     db.masterAccounts.push(master);
     writeDb(db);
     res.json(master);
@@ -566,6 +573,8 @@ app.put('/api/masters/:id', (req, res) => {
     const idx = db.masterAccounts.findIndex((m) => m.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'Not found' });
     const current = db.masterAccounts[idx];
+    const hasMode = Object.prototype.hasOwnProperty.call(req.body || {}, 'mode');
+    const mode = hasMode ? normalizeMasterMode(req.body?.mode) : normalizeMasterMode(current.mode);
     const hasMt5Path = Object.prototype.hasOwnProperty.call(req.body || {}, 'mt5Path');
     const requestedPath = hasMt5Path ? req.body.mt5Path : current.mt5Path;
     const validation = validateUniqueMt5Path(db, requestedPath, { kind: 'master', id: current.id });
@@ -577,6 +586,7 @@ app.put('/api/masters/:id', (req, res) => {
         ...current,
         ...req.body,
         mt5Path: validation.mt5Path,
+        mode,
         lastUpdated: today(),
     };
     writeDb(db);
@@ -605,6 +615,7 @@ app.post('/api/masters/:id/activate', (req, res) => {
     db.masterAccounts[idx] = {
         ...current,
         mt5Path: validation.mt5Path,
+        mode: normalizeMasterMode(current.mode),
         status: 'active',
         lastUpdated: today(),
     };

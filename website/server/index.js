@@ -18,6 +18,10 @@ function readDb() {
   return JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
 }
 
+function normalizeMasterMode(value) {
+  return String(value || "").toLowerCase() === "automated" ? "automated" : "manual";
+}
+
 function writeDb(data) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), "utf-8");
 }
@@ -30,7 +34,7 @@ app.get("/api/data", (req, res) => {
 // POST add master account
 app.post("/api/masters", (req, res) => {
   const db = readDb();
-  const newMaster = req.body;
+  const newMaster = { ...req.body, mode: normalizeMasterMode(req.body?.mode) };
   db.masterAccounts.push(newMaster);
   writeDb(db);
   res.json(newMaster);
@@ -50,7 +54,13 @@ app.put("/api/masters/:id", (req, res) => {
   const db = readDb();
   const idx = db.masterAccounts.findIndex((m) => m.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: "Not found" });
-  db.masterAccounts[idx] = { ...db.masterAccounts[idx], ...req.body, lastUpdated: new Date().toISOString().split("T")[0] };
+  const hasMode = Object.prototype.hasOwnProperty.call(req.body || {}, "mode");
+  db.masterAccounts[idx] = {
+    ...db.masterAccounts[idx],
+    ...req.body,
+    mode: hasMode ? normalizeMasterMode(req.body?.mode) : normalizeMasterMode(db.masterAccounts[idx]?.mode),
+    lastUpdated: new Date().toISOString().split("T")[0],
+  };
   writeDb(db);
   res.json(db.masterAccounts[idx]);
 });
@@ -89,6 +99,7 @@ app.post("/api/masters/:id/activate", (req, res) => {
   if (idx === -1) return res.status(404).json({ error: "Not found" });
   db.masterAccounts[idx] = {
     ...db.masterAccounts[idx],
+    mode: normalizeMasterMode(db.masterAccounts[idx]?.mode),
     status: "active",
     lastUpdated: new Date().toISOString().split("T")[0],
   };

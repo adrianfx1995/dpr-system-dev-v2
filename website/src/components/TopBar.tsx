@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, Minus, Wallet, TrendingUp, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { Plus, Minus, Wallet, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -29,19 +29,55 @@ const emptyForm = { name: "", accountNumber: "", masterPass: "", server: "", mt5
 const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveAccount, masterAccounts, slaveAccounts }: TopBarProps) => {
   const [newAccountType, setNewAccountType] = useState<"master" | "slave">("master");
   const [form, setForm] = useState(emptyForm);
+  const [pathCheck, setPathCheck] = useState<{ status: "idle" | "checking" | "ok" | "missing" | "error"; message: string }>({
+    status: "idle",
+    message: "",
+  });
   const [removeType, setRemoveType] = useState<"master" | "slave">("master");
   const [removeId, setRemoveId] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
 
-  const setField = (field: keyof typeof emptyForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setForm((prev) => ({ ...prev, [field]: e.target.value }));
+  const setField = (field: keyof typeof emptyForm) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setForm((prev) => ({ ...prev, [field]: value }));
+    if (field === "mt5Path") setPathCheck({ status: "idle", message: "" });
+  };
 
   const handleAdd = () => {
-    if (form.name.trim() && form.accountNumber.trim() && form.server.trim()) {
-      onAddAccount({ type: newAccountType, ...form });
+    const mt5Path = form.mt5Path.trim();
+    if (form.name.trim() && form.accountNumber.trim() && form.server.trim() && mt5Path) {
+      onAddAccount({ type: newAccountType, ...form, mt5Path });
       setForm(emptyForm);
+      setPathCheck({ status: "idle", message: "" });
       setAddOpen(false);
+    }
+  };
+
+  const checkPath = async () => {
+    const mt5Path = form.mt5Path.trim();
+    if (!mt5Path) {
+      setPathCheck({ status: "error", message: "Enter MT5 terminal path first." });
+      return;
+    }
+
+    setPathCheck({ status: "checking", message: "Checking path on engine host..." });
+    try {
+      const res = await fetch("/api/mt5-path/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mt5Path }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || "Failed to check path");
+
+      if (body.exists) {
+        setPathCheck({ status: "ok", message: "Path found on engine host." });
+      } else {
+        setPathCheck({ status: "missing", message: "Path not found on engine host." });
+      }
+    } catch (e) {
+      setPathCheck({ status: "error", message: e instanceof Error ? e.message : "Failed to check MT5 path." });
     }
   };
 
@@ -73,9 +109,6 @@ const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveA
               <p className="hidden sm:block text-xs text-topbar-foreground/50 uppercase tracking-wider font-medium">Master Balance</p>
               <div className="flex items-center gap-1.5 sm:gap-2">
                 <span className="text-base sm:text-xl font-semibold font-mono">${totalMasterBalance.toLocaleString()}</span>
-                <span className="text-xs text-badge-success flex items-center gap-0.5">
-                  <ArrowUpRight className="w-3 h-3" /> 12.4%
-                </span>
               </div>
             </div>
           </div>
@@ -90,9 +123,6 @@ const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveA
               <p className="hidden sm:block text-xs text-topbar-foreground/50 uppercase tracking-wider font-medium">Slave Balance</p>
               <div className="flex items-center gap-1.5 sm:gap-2">
                 <span className="text-base sm:text-xl font-semibold font-mono">${totalSlaveBalance.toLocaleString()}</span>
-                <span className="text-xs text-badge-warning flex items-center gap-0.5">
-                  <ArrowDownRight className="w-3 h-3" /> 3.1%
-                </span>
               </div>
             </div>
           </div>
@@ -100,7 +130,16 @@ const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveA
 
         {/* Actions */}
         <div className="flex items-center gap-1.5 sm:gap-2">
-          <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setForm(emptyForm); }}>
+          <Dialog
+            open={addOpen}
+            onOpenChange={(open) => {
+              setAddOpen(open);
+              if (!open) {
+                setForm(emptyForm);
+                setPathCheck({ status: "idle", message: "" });
+              }
+            }}
+          >
             <DialogTrigger asChild>
               <Button size="sm" className="gap-1.5">
                 <Plus className="w-4 h-4" /> <span className="hidden sm:inline">Add Account</span>
@@ -137,17 +176,35 @@ const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveA
                   <Label>Server</Label>
                   <Input placeholder="e.g. ICMarkets-Live01" value={form.server} onChange={setField("server")} onKeyDown={(e) => e.key === "Enter" && handleAdd()} />
                 </div>
-                {newAccountType === "slave" && (
-                  <div className="space-y-1.5">
-                    <Label>MT5 Terminal Path (Optional)</Label>
-                    <Input
-                      placeholder="e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe"
-                      value={form.mt5Path}
-                      onChange={setField("mt5Path")}
-                    />
+                <div className="space-y-1.5">
+                  <Label>MT5 Terminal Path (Required)</Label>
+                  <Input
+                    placeholder="e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+                    value={form.mt5Path}
+                    onChange={setField("mt5Path")}
+                  />
+                  <div className="flex items-center justify-between gap-2">
+                    <p
+                      className={`text-[11px] ${
+                        pathCheck.status === "ok"
+                          ? "text-badge-success"
+                          : pathCheck.status === "missing" || pathCheck.status === "error"
+                            ? "text-destructive"
+                            : "text-muted-foreground"
+                      }`}
+                    >
+                      {pathCheck.message || "Each account must have a unique MT5 path."}
+                    </p>
+                    <Button type="button" variant="outline" size="sm" onClick={checkPath} disabled={pathCheck.status === "checking"}>
+                      {pathCheck.status === "checking" ? "Checking..." : "Check Path"}
+                    </Button>
                   </div>
-                )}
-                <Button onClick={handleAdd} className="w-full" disabled={!form.name.trim() || !form.accountNumber.trim() || !form.server.trim()}>
+                </div>
+                <Button
+                  onClick={handleAdd}
+                  className="w-full"
+                  disabled={!form.name.trim() || !form.accountNumber.trim() || !form.server.trim() || !form.mt5Path.trim()}
+                >
                   Create Account
                 </Button>
               </div>

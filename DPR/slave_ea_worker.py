@@ -22,12 +22,15 @@ PING_INTERVAL = 30
 VOLUME_EPS = 1e-6
 
 mt5_lock = threading.Lock()
-COPY_COMMENT_PREFIX = "DPR-MT:"
+COPY_COMMENT_PREFIX = "SG:"
 
 _state_lock = threading.Lock()
 _last_master_positions = {}  # {int(masterTicket): volume} — updated each snapshot
 _master_driven_close_credit = {}  # {int(masterTicket): volume} already explained by master->slave close/reduce
 _upstream_close_pending = {}  # {int(masterTicket): volume} already reported upstream, waiting for master snapshot ack
+
+_slave_origin_lock = threading.Lock()
+_slave_origin_positions = {}  # {int(slaveTicket): {"symbol":…, "action":…, "lot":…}}
 
 
 def tcp_send(sock, line):
@@ -119,7 +122,7 @@ def register_with_engine(sock, instance_id, route_tag, slave_id, master_id):
 
 def execute_trade(symbol, action, lot, instance_id):
     with mt5_lock:
-        req = build_market_request(symbol, action, lot, "DPR-SLAVE", None, instance_id)
+        req = build_market_request(symbol, action, lot, "EA", None, instance_id)
         if not req:
             return
         result = order_send_with_fill_fallback(req)
@@ -253,7 +256,7 @@ def close_copy_by_master_ticket(master_ticket, volume_to_close, instance_id):
                     close_volume = min(close_volume, remaining_total)
                 request = build_market_request(
                     pos.symbol, close_action, close_volume,
-                    f"{marker}-CLOSE", pos.ticket, instance_id,
+                    f"{marker}:X", pos.ticket, instance_id,
                 )
                 if not request:
                     all_ok = False
@@ -462,7 +465,7 @@ def close_positions(filter_fn, label, instance_id):
                 "price": price,
                 "type_filling": mt5.ORDER_FILLING_FOK,
                 "magic": 5430,
-                "comment": f"DPR-{label}",
+                "comment": f"EA:{label}",
             }
             matched += 1
             result = mt5.order_send(request)
@@ -506,8 +509,6 @@ def process_command(line, symbol, instance_id, master_id):
             return
         if op == "open":
             copy_symbol = data.get("symbol") or symbol
-            if copy_symbol.upper() != symbol.upper():
-                return  # Signal is for a different symbol — skip
             copy_action = (data.get("action") or "").upper()
             copy_lot = float(data.get("lot") or lot or 0.01)
             if copy_action in ("BUY", "SELL"):
@@ -539,6 +540,74 @@ def process_command(line, symbol, instance_id, master_id):
         close_positions(lambda p: p.profit > 0, "CLOSE_PROFITS", instance_id)
     else:
         print(f"[{instance_id}] UNKNOWN_ACTION {action}")
+
+
+def start_slave_origin_monitor(sock, slave_id, master_id, instance_id, stop_event):
+    """
+    Monitors positions on the slave that were NOT opened by master copy (no DPR-MT: prefix).
+    When a new slave-originated position is detected, signals master to open the opposite hedge.
+    When it closes, signals master to close the hedge.
+    """
+    global _slave_origin_positions
+
+    def run():
+        global _slave_origin_positions
+        while not stop_event.wait(0.5):
+            try:
+                with mt5_lock:
+                    positions = mt5.positions_get() or []
+
+                current = {}
+                for p in positions:
+                    comment = getattr(p, "comment", "") or ""
+                    if comment.startswith(COPY_COMMENT_PREFIX):
+                        continue  # skip master-copied positions
+                    ticket = int(p.ticket)
+                    action = "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL"
+                    current[ticket] = {
+                        "symbol": p.symbol,
+                        "action": action,
+                        "lot": round(float(p.volume), 8),
+                    }
+
+                with _slave_origin_lock:
+                    known = dict(_slave_origin_positions)
+
+                # New positions: not in known
+                for ticket, info in current.items():
+                    if ticket not in known:
+                        payload = json.dumps({
+                            "kind": "slave_origin_open",
+                            "slaveId": slave_id,
+                            "masterId": master_id,
+                            "slaveTicket": ticket,
+                            "symbol": info["symbol"],
+                            "action": info["action"],
+                            "lot": info["lot"],
+                        })
+                        tcp_send(sock, f"REVERSE_SIGNAL {payload}")
+                        print(f"[{instance_id}] SLAVE_ORIGIN_OPEN ticket={ticket} {info['action']} {info['lot']} {info['symbol']}")
+                        with _slave_origin_lock:
+                            _slave_origin_positions[ticket] = info
+
+                # Closed positions: were known, now gone
+                for ticket in list(known.keys()):
+                    if ticket not in current:
+                        payload = json.dumps({
+                            "kind": "slave_origin_close",
+                            "slaveId": slave_id,
+                            "masterId": master_id,
+                            "slaveTicket": ticket,
+                        })
+                        tcp_send(sock, f"REVERSE_SIGNAL {payload}")
+                        print(f"[{instance_id}] SLAVE_ORIGIN_CLOSE ticket={ticket}")
+                        with _slave_origin_lock:
+                            _slave_origin_positions.pop(ticket, None)
+
+            except Exception as e:
+                print(f"[{instance_id}] slave_origin_monitor error: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def start_listener(sock, symbol, instance_id, master_id, stop_event):
@@ -622,6 +691,7 @@ def main():
         start_listener(sock, args.symbol, instance_id, args.master_id, stop_event)
         start_ping(sock, instance_id, stop_event)
         start_slave_position_monitor(sock, args.slave_id, args.master_id, instance_id, stop_event)
+        start_slave_origin_monitor(sock, args.slave_id, args.master_id, instance_id, stop_event)
 
         try:
             while not stop_event.wait(DATA_INTERVAL):
@@ -657,6 +727,8 @@ def main():
                 pass
             with mt5_lock:
                 mt5.shutdown()
+            with _slave_origin_lock:
+                _slave_origin_positions.clear()
 
         time.sleep(backoff)
 

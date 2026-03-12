@@ -12,6 +12,7 @@ export interface MasterAccount {
   masterPass: string;
   broker: string;
   mt5Path?: string;
+  mode?: "manual" | "automated";
   currency: string;
   balance: number;
   equity: number;
@@ -72,6 +73,10 @@ interface MasterAccountListProps {
 const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate, onDeactivate }: MasterAccountListProps) => {
   const [editAccount, setEditAccount] = useState<MasterAccount | null>(null);
   const [form, setForm] = useState<Partial<MasterAccount>>({});
+  const [pathCheck, setPathCheck] = useState<{ status: "idle" | "checking" | "ok" | "missing" | "error"; message: string }>({
+    status: "idle",
+    message: "",
+  });
 
   const openEdit = (e: React.MouseEvent, account: MasterAccount) => {
     e.stopPropagation();
@@ -81,18 +86,53 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
       accountNumber: account.accountNumber,
       masterPass: account.masterPass,
       broker: account.broker,
+      mt5Path: account.mt5Path ?? "",
     });
+    setPathCheck({ status: "idle", message: "" });
   };
 
   const handleSave = () => {
     if (editAccount) {
-      onEdit(editAccount.id, form);
+      const mt5Path = String(form.mt5Path || "").trim();
+      if (!mt5Path) return;
+      onEdit(editAccount.id, { ...form, mt5Path });
       setEditAccount(null);
+      setPathCheck({ status: "idle", message: "" });
     }
   };
 
-  const setField = (field: keyof MasterAccount) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setForm((prev) => ({ ...prev, [field]: e.target.value }));
+  const setField = (field: keyof MasterAccount) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setForm((prev) => ({ ...prev, [field]: value }));
+    if (field === "mt5Path") setPathCheck({ status: "idle", message: "" });
+  };
+
+  const checkPath = async () => {
+    const mt5Path = String(form.mt5Path || "").trim();
+    if (!mt5Path) {
+      setPathCheck({ status: "error", message: "Enter MT5 terminal path first." });
+      return;
+    }
+
+    setPathCheck({ status: "checking", message: "Checking path on engine host..." });
+    try {
+      const res = await fetch("/api/mt5-path/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mt5Path }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || "Failed to check path");
+
+      if (body.exists) {
+        setPathCheck({ status: "ok", message: "Path found on engine host." });
+      } else {
+        setPathCheck({ status: "missing", message: "Path not found on engine host." });
+      }
+    } catch (e) {
+      setPathCheck({ status: "error", message: e instanceof Error ? e.message : "Failed to check MT5 path." });
+    }
+  };
 
   return (
     <div className="h-full bg-master text-master-foreground flex flex-col">
@@ -143,6 +183,11 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
                 <p className="text-[10px] text-master-foreground/40">{account.broker} · {account.accountNumber}</p>
                 <MT5StatusBadge status={account.mtStatus} message={account.mtMessage} />
               </div>
+              {account.mt5Path && (
+                <div className="mb-2 pl-4 text-[10px] text-master-foreground/50 truncate" title={account.mt5Path}>
+                  MT5: {account.mt5Path}
+                </div>
+              )}
 
               <div className="flex items-end justify-between">
                 <div>
@@ -163,6 +208,7 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
                 <span className="text-[10px] text-master-foreground/40">
                   Equity: <span className="text-master-foreground/70">${account.equity.toLocaleString()}</span>
                   <span className="ml-2">· {account.slaveCount} slaves</span>
+                  <span className="ml-2">· {(account.mode === "automated" ? "Automated" : "Manual")} mode</span>
                 </span>
                 {/* Always-visible Activate / Deactivate button */}
                 {isActive ? (
@@ -191,7 +237,15 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
       </div>
 
       {/* Edit Dialog */}
-      <Dialog open={!!editAccount} onOpenChange={(open) => !open && setEditAccount(null)}>
+      <Dialog
+        open={!!editAccount}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditAccount(null);
+            setPathCheck({ status: "idle", message: "" });
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Master Account</DialogTitle>
@@ -213,7 +267,27 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
               <Label>Server</Label>
               <Input value={form.broker ?? ""} onChange={setField("broker")} />
             </div>
-            <Button onClick={handleSave} className="w-full">Save Changes</Button>
+            <div className="space-y-1.5">
+              <Label>MT5 Terminal Path (Required)</Label>
+              <Input value={form.mt5Path ?? ""} onChange={setField("mt5Path")} />
+              <div className="flex items-center justify-between gap-2">
+                <p
+                  className={`text-[11px] ${
+                    pathCheck.status === "ok"
+                      ? "text-badge-success"
+                      : pathCheck.status === "missing" || pathCheck.status === "error"
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                  }`}
+                >
+                  {pathCheck.message || "Each account must have a unique MT5 path."}
+                </p>
+                <Button type="button" variant="outline" size="sm" onClick={checkPath} disabled={pathCheck.status === "checking"}>
+                  {pathCheck.status === "checking" ? "Checking..." : "Check Path"}
+                </Button>
+              </div>
+            </div>
+            <Button onClick={handleSave} className="w-full" disabled={!String(form.mt5Path || "").trim()}>Save Changes</Button>
           </div>
         </DialogContent>
       </Dialog>
