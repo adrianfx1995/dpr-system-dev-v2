@@ -25,13 +25,24 @@ export interface SlaveAccount {
 }
 
 type MasterMode = "manual" | "automated";
+export type ManualCommandType =
+  | "buy"
+  | "sell"
+  | "hedge"
+  | "close_all"
+  | "close_buys"
+  | "close_sells"
+  | "close_profits";
 
 interface SlaveAccountPanelProps {
   accounts: SlaveAccount[];
   masterId: string | null;
   masterName: string | null;
   masterMode?: MasterMode;
+  masterStatus?: "active" | "paused";
   onMasterModeChange?: (masterId: string, mode: MasterMode) => void;
+  onManualCommand?: (masterId: string, type: ManualCommandType, lot?: number) => void;
+  manualCommandPending?: boolean;
   onEdit: (id: string, updates: Partial<SlaveAccount>) => void;
 }
 
@@ -73,20 +84,38 @@ const SlaveAccountPanel = ({
   masterId,
   masterName,
   masterMode,
+  masterStatus,
   onMasterModeChange,
+  onManualCommand,
+  manualCommandPending,
   onEdit,
 }: SlaveAccountPanelProps) => {
   const [editAccount, setEditAccount] = useState<SlaveAccount | null>(null);
   const [form, setForm] = useState<Partial<SlaveAccount>>({});
+  const [manualLot, setManualLot] = useState("0.01");
   const [pathCheck, setPathCheck] = useState<{ status: "idle" | "checking" | "ok" | "missing" | "error"; message: string }>({
     status: "idle",
     message: "",
   });
   const resolvedMasterMode: MasterMode = masterMode === "automated" ? "automated" : "manual";
+  const numericLot = Number(manualLot);
+  const lotValid = Number.isFinite(numericLot) && numericLot > 0;
+  const manualReady =
+    !!masterId &&
+    !!onManualCommand &&
+    !manualCommandPending &&
+    resolvedMasterMode === "manual" &&
+    masterStatus === "active";
 
   const updateMode = (mode: MasterMode) => {
     if (!masterId || !onMasterModeChange || resolvedMasterMode === mode) return;
     onMasterModeChange(masterId, mode);
+  };
+
+  const runManualCommand = (type: ManualCommandType, requiresLot: boolean) => {
+    if (!masterId || !onManualCommand || !manualReady) return;
+    if (requiresLot && !lotValid) return;
+    onManualCommand(masterId, type, requiresLot ? numericLot : undefined);
   };
 
   const openEdit = (account: SlaveAccount) => {
@@ -193,6 +222,45 @@ const SlaveAccountPanel = ({
             ? "Automated mode selected. Automation behavior will be connected in a later update."
             : "Manual mode is active by default."}
         </p>
+        <div className="mt-3 rounded-lg border border-border bg-card/60 p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Manual Control</span>
+            <span className={`text-[11px] font-medium ${manualReady ? "text-badge-success" : "text-muted-foreground"}`}>
+              {manualCommandPending ? "Sending..." : manualReady ? "Ready" : "Locked"}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap items-end gap-2">
+            <div className="w-[120px] space-y-1">
+              <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Lot</Label>
+              <Input
+                type="number"
+                min="0.01"
+                step="0.01"
+                value={manualLot}
+                onChange={(e) => setManualLot(e.target.value)}
+                disabled={resolvedMasterMode !== "manual" || masterStatus !== "active" || !!manualCommandPending}
+              />
+            </div>
+            <Button size="sm" onClick={() => runManualCommand("buy", true)} disabled={!manualReady || !lotValid}>Buy</Button>
+            <Button size="sm" variant="secondary" onClick={() => runManualCommand("sell", true)} disabled={!manualReady || !lotValid}>Sell</Button>
+            <Button size="sm" variant="outline" onClick={() => runManualCommand("hedge", true)} disabled={!manualReady || !lotValid}>Hedge</Button>
+          </div>
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Button size="sm" variant="outline" onClick={() => runManualCommand("close_all", false)} disabled={!manualReady}>Close All</Button>
+            <Button size="sm" variant="outline" onClick={() => runManualCommand("close_buys", false)} disabled={!manualReady}>Close Buys</Button>
+            <Button size="sm" variant="outline" onClick={() => runManualCommand("close_sells", false)} disabled={!manualReady}>Close Sells</Button>
+            <Button size="sm" variant="outline" onClick={() => runManualCommand("close_profits", false)} disabled={!manualReady}>Close Profits</Button>
+          </div>
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {resolvedMasterMode !== "manual"
+              ? "Manual commands are disabled while this master is in automated mode."
+              : masterStatus !== "active"
+                ? "Activate this master account to enable manual commands."
+                : !lotValid
+                  ? "Enter a valid lot greater than 0 for Buy/Sell/Hedge."
+                  : "Commands are sent to the selected master and routed through the engine."}
+          </p>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 sm:p-4">

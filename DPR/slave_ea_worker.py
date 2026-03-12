@@ -28,6 +28,7 @@ _state_lock = threading.Lock()
 _last_master_positions = {}  # {int(masterTicket): volume} — updated each snapshot
 _master_driven_close_credit = {}  # {int(masterTicket): volume} already explained by master->slave close/reduce
 _upstream_close_pending = {}  # {int(masterTicket): volume} already reported upstream, waiting for master snapshot ack
+_last_slave_copy_volumes = {}  # {int(masterTicket): volume} last observed slave copied volume
 
 _slave_origin_lock = threading.Lock()
 _slave_origin_positions = {}  # {int(slaveTicket): {"symbol":…, "action":…, "lot":…}}
@@ -327,6 +328,7 @@ def start_slave_position_monitor(sock, slave_id, master_id, instance_id, stop_ev
                 with _state_lock:
                     expected_master = dict(_last_master_positions)
                     expected_tickets = set(expected_master.keys())
+                    previous_volumes = dict(_last_slave_copy_volumes)
                     for ticket in list(_master_driven_close_credit.keys()):
                         if ticket not in expected_tickets:
                             _master_driven_close_credit.pop(ticket, None)
@@ -334,30 +336,35 @@ def start_slave_position_monitor(sock, slave_id, master_id, instance_id, stop_ev
                         if ticket not in expected_tickets:
                             _upstream_close_pending.pop(ticket, None)
 
-                    for ticket, master_volume in expected_master.items():
+                    # Only report slave->master closes when copied volume actually decreased
+                    # on the slave side. This avoids false master closes when a copy-open fails.
+                    for ticket, previous_volume in previous_volumes.items():
                         current_volume = current_volumes.get(ticket, 0.0)
-                        missing_volume = round(float(master_volume) - float(current_volume), 8)
-                        if missing_volume <= VOLUME_EPS:
+                        local_reduction = round(float(previous_volume) - float(current_volume), 8)
+                        if local_reduction <= VOLUME_EPS:
                             continue
 
                         credit = _master_driven_close_credit.get(ticket, 0.0)
                         if credit > VOLUME_EPS:
-                            used = min(missing_volume, credit)
-                            missing_volume = round(missing_volume - used, 8)
+                            used = min(local_reduction, credit)
+                            local_reduction = round(local_reduction - used, 8)
                             credit = round(credit - used, 8)
                             if credit <= VOLUME_EPS:
                                 _master_driven_close_credit.pop(ticket, None)
                             else:
                                 _master_driven_close_credit[ticket] = credit
 
-                        if missing_volume <= VOLUME_EPS:
+                        if local_reduction <= VOLUME_EPS:
                             continue
 
                         already_sent = _upstream_close_pending.get(ticket, 0.0)
-                        send_volume = round(missing_volume - already_sent, 8)
-                        if send_volume > VOLUME_EPS:
-                            _upstream_close_pending[ticket] = round(already_sent + send_volume, 8)
-                            to_report.append((ticket, send_volume))
+                        _upstream_close_pending[ticket] = round(already_sent + local_reduction, 8)
+                        to_report.append((ticket, local_reduction))
+
+                    _last_slave_copy_volumes.clear()
+                    for ticket, volume in current_volumes.items():
+                        if ticket in expected_tickets:
+                            _last_slave_copy_volumes[ticket] = round(float(volume), 8)
 
                 for ticket, volume in to_report:
                     send_reverse_signal(sock, slave_id, master_id, ticket, volume)
@@ -589,6 +596,27 @@ def start_slave_origin_monitor(sock, slave_id, master_id, instance_id, stop_even
                         print(f"[{instance_id}] SLAVE_ORIGIN_OPEN ticket={ticket} {info['action']} {info['lot']} {info['symbol']}")
                         with _slave_origin_lock:
                             _slave_origin_positions[ticket] = info
+                    else:
+                        prev = known[ticket]
+                        changed = (
+                            prev.get("symbol") != info["symbol"] or
+                            prev.get("action") != info["action"] or
+                            abs(float(prev.get("lot", 0.0)) - float(info["lot"])) > VOLUME_EPS
+                        )
+                        if changed:
+                            payload = json.dumps({
+                                "kind": "slave_origin_sync",
+                                "slaveId": slave_id,
+                                "masterId": master_id,
+                                "slaveTicket": ticket,
+                                "symbol": info["symbol"],
+                                "action": info["action"],
+                                "lot": info["lot"],
+                            })
+                            tcp_send(sock, f"REVERSE_SIGNAL {payload}")
+                            print(f"[{instance_id}] SLAVE_ORIGIN_SYNC ticket={ticket} {info['action']} {info['lot']} {info['symbol']}")
+                            with _slave_origin_lock:
+                                _slave_origin_positions[ticket] = info
 
                 # Closed positions: were known, now gone
                 for ticket in list(known.keys()):
@@ -686,6 +714,15 @@ def main():
 
         ok, msg = connect_mt5(args.account, args.password, args.server, args.mt5_path, instance_id)
         send_status(sock, "connected" if ok else "error", msg)
+        if not ok:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            with mt5_lock:
+                mt5.shutdown()
+            time.sleep(backoff)
+            continue
 
         stop_event = threading.Event()
         start_listener(sock, args.symbol, instance_id, args.master_id, stop_event)
@@ -693,16 +730,21 @@ def main():
         start_slave_position_monitor(sock, args.slave_id, args.master_id, instance_id, stop_event)
         start_slave_origin_monitor(sock, args.slave_id, args.master_id, instance_id, stop_event)
 
+        missing_info_streak = 0
         try:
             while not stop_event.wait(DATA_INTERVAL):
                 with mt5_lock:
                     info = mt5.account_info()
                 if info is None:
+                    missing_info_streak += 1
                     if ok:
                         ok = False
                         send_status(sock, "error", "MT5 connection lost")
+                    if missing_info_streak >= 3:
+                        raise ConnectionError("MT5 account_info unavailable repeatedly")
                     continue
 
+                missing_info_streak = 0
                 if not ok:
                     ok = True
                     send_status(sock, "connected", "Reconnected")
@@ -729,6 +771,11 @@ def main():
                 mt5.shutdown()
             with _slave_origin_lock:
                 _slave_origin_positions.clear()
+            with _state_lock:
+                _last_master_positions.clear()
+                _master_driven_close_credit.clear()
+                _upstream_close_pending.clear()
+                _last_slave_copy_volumes.clear()
 
         time.sleep(backoff)
 

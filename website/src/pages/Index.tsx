@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef } from "react";
 import TopBar, { NewAccountDetails } from "@/components/TopBar";
 import MasterAccountList, { MasterAccount } from "@/components/MasterAccountList";
-import SlaveAccountPanel, { SlaveAccount } from "@/components/SlaveAccountPanel";
+import SlaveAccountPanel, { SlaveAccount, ManualCommandType } from "@/components/SlaveAccountPanel";
 import { SystemStatusPanel } from "@/components/SystemStatusPanel";
 import { toast } from "@/components/ui/sonner";
 
@@ -172,6 +172,28 @@ const Index = () => {
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Failed to update account"),
   });
 
+  const manualCommandMutation = useMutation({
+    mutationFn: async ({ masterId, type, lot }: { masterId: string; type: ManualCommandType; lot?: number }) => {
+      const body: Record<string, string | number> = { masterId, type };
+      if (typeof lot === "number") body.lot = lot;
+      return requestJson("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    },
+    onSuccess: (result: any, vars) => {
+      if (result?.warning) {
+        toast.warning(result.warning);
+      } else {
+        const sent = typeof result?.sent === "number" ? ` (${result.sent} target${result.sent === 1 ? "" : "s"})` : "";
+        toast.success(`Manual command "${vars.type}" sent${sent}`);
+      }
+      queryClient.invalidateQueries({ queryKey: ["data"] });
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Failed to send manual command"),
+  });
+
   const handleRemoveAccount = (type: "master" | "slave", id: string) => {
     if (type === "master" && selectedMasterId === id) setSelectedMasterId(null);
     removeMutation.mutate({ type, id });
@@ -188,6 +210,10 @@ const Index = () => {
 
   const handleMasterModeChange = (id: string, mode: "manual" | "automated") => {
     handleEditMaster(id, { mode });
+  };
+
+  const handleManualCommand = (masterId: string, type: ManualCommandType, lot?: number) => {
+    manualCommandMutation.mutate({ masterId, type, lot });
   };
 
   const handleEditSlave = (id: string, updates: Partial<SlaveAccount>) => {
@@ -273,7 +299,10 @@ const Index = () => {
             masterId={selectedMaster?.id || null}
             masterName={selectedMaster?.name || null}
             masterMode={selectedMaster?.mode}
+            masterStatus={selectedMaster?.status}
             onMasterModeChange={handleMasterModeChange}
+            onManualCommand={handleManualCommand}
+            manualCommandPending={manualCommandMutation.isPending}
             onEdit={handleEditSlave}
           />
         </div>

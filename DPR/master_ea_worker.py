@@ -19,6 +19,7 @@ except ImportError:
 
 DATA_INTERVAL = 10
 RECONNECT_BACKOFF = 5
+HEDGE_VOLUME_EPS = 1e-6
 
 mt5_lock = threading.Lock()
 
@@ -216,46 +217,97 @@ def open_slave_hedge(symbol, action, lot, comment, slave_id_src, slave_ticket, i
             _pending_hedge_opens.discard(comment)
 
 
-def close_slave_hedge(comment, instance_id):
-    """Close the master hedge position that matches the given comment."""
+def close_slave_hedge(comment, instance_id, volume_to_close=None):
+    """Close all or part of the master hedge positions that match the given comment."""
     with mt5_lock:
-        positions = mt5.positions_get() or []
-        target = None
-        for p in positions:
-            if getattr(p, "comment", "") == comment:
-                target = p
-                break
-
-        if target is None:
+        positions = [p for p in (mt5.positions_get() or []) if getattr(p, "comment", "") == comment]
+        if not positions:
             print(f"[{instance_id}] HEDGE_CLOSE no position found comment={comment}")
             return
 
-        is_buy = target.type == mt5.POSITION_TYPE_BUY
-        close_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
-        tick = mt5.symbol_info_tick(target.symbol)
-        if tick is None:
-            print(f"[{instance_id}] HEDGE_CLOSE no tick for {target.symbol}")
-            return
-        price = tick.bid if is_buy else tick.ask
+        remaining = None
+        if volume_to_close is not None:
+            try:
+                remaining = max(0.0, float(volume_to_close))
+            except Exception:
+                remaining = 0.0
+            if remaining <= HEDGE_VOLUME_EPS:
+                return
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": target.symbol,
-            "volume": float(target.volume),
-            "type": close_type,
-            "position": int(target.ticket),
-            "price": price,
-            "magic": 5430,
-            "comment": "RG:X",
-        }
-        result = order_send_with_fill_fallback(request)
+        for target in positions:
+            if remaining is not None and remaining <= HEDGE_VOLUME_EPS:
+                break
 
-    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"[{instance_id}] HEDGE_CLOSE_OK ticket={target.ticket} comment={comment}")
-    else:
-        code = result.retcode if result else "none"
-        cmt = result.comment if result else ""
-        print(f"[{instance_id}] HEDGE_CLOSE_FAIL ticket={target.ticket} code={code} {cmt}")
+            close_volume = float(target.volume)
+            if remaining is not None:
+                close_volume = min(close_volume, remaining)
+            if close_volume <= HEDGE_VOLUME_EPS:
+                continue
+
+            is_buy = target.type == mt5.POSITION_TYPE_BUY
+            close_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+            tick = mt5.symbol_info_tick(target.symbol)
+            if tick is None:
+                print(f"[{instance_id}] HEDGE_CLOSE no tick for {target.symbol}")
+                continue
+            price = tick.bid if is_buy else tick.ask
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": target.symbol,
+                "volume": close_volume,
+                "type": close_type,
+                "position": int(target.ticket),
+                "price": price,
+                "magic": 5430,
+                "comment": "RG:X",
+            }
+            result = order_send_with_fill_fallback(request)
+
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"[{instance_id}] HEDGE_CLOSE_OK ticket={target.ticket} comment={comment} vol={close_volume}")
+                if remaining is not None:
+                    remaining = round(remaining - close_volume, 8)
+            else:
+                code = result.retcode if result else "none"
+                cmt = result.comment if result else ""
+                print(f"[{instance_id}] HEDGE_CLOSE_FAIL ticket={target.ticket} code={code} {cmt}")
+
+
+def sync_slave_hedge(symbol, action, lot, comment, slave_id_src, slave_ticket, instance_id):
+    """Match hedge volume/action on master to a slave-originated ticket state."""
+    try:
+        target_lot = max(0.0, float(lot))
+    except Exception:
+        target_lot = 0.0
+
+    with mt5_lock:
+        existing = [p for p in (mt5.positions_get() or []) if getattr(p, "comment", "") == comment]
+        current_lot = round(sum(float(p.volume) for p in existing), 8)
+        current_symbol = existing[0].symbol if existing else None
+        if existing:
+            current_action = "BUY" if existing[0].type == mt5.POSITION_TYPE_BUY else "SELL"
+        else:
+            current_action = None
+
+    if target_lot <= HEDGE_VOLUME_EPS:
+        close_slave_hedge(comment, instance_id)
+        return
+
+    if not existing:
+        open_slave_hedge(symbol, action, target_lot, comment, slave_id_src, slave_ticket, instance_id)
+        return
+
+    if current_symbol != symbol or current_action != action:
+        close_slave_hedge(comment, instance_id)
+        open_slave_hedge(symbol, action, target_lot, comment, slave_id_src, slave_ticket, instance_id)
+        return
+
+    delta = round(target_lot - current_lot, 8)
+    if delta > HEDGE_VOLUME_EPS:
+        open_slave_hedge(symbol, action, delta, comment, slave_id_src, slave_ticket, instance_id)
+    elif delta < -HEDGE_VOLUME_EPS:
+        close_slave_hedge(comment, instance_id, abs(delta))
 
 
 def close_master_position_by_ticket(ticket, volume_to_close, instance_id):
@@ -367,6 +419,25 @@ def start_listener(sock, stop_event, instance_id):
                                 threading.Thread(
                                     target=close_slave_hedge,
                                     args=(comment, instance_id),
+                                    daemon=True,
+                                ).start()
+                            continue
+                        if data.get("kind") == "slave_origin_sync":
+                            slave_id_src = str(data.get("slaveId") or "")
+                            slave_ticket = int(data.get("slaveTicket") or 0)
+                            symbol = str(data.get("symbol") or "")
+                            action = str(data.get("action") or "").upper()
+                            lot = float(data.get("lot") or 0.0)
+                            hedge_action = "SELL" if action == "BUY" else "BUY"
+                            comment = f"{HEDGE_COMMENT_PREFIX}{slave_id_src}:{slave_ticket}"
+                            if slave_id_src and slave_ticket and symbol and action in ("BUY", "SELL"):
+                                print(
+                                    f"[{instance_id}] SLAVE_ORIGIN_SYNC slaveId={slave_id_src} "
+                                    f"ticket={slave_ticket} action={action} lot={lot} symbol={symbol}"
+                                )
+                                threading.Thread(
+                                    target=sync_slave_hedge,
+                                    args=(symbol, hedge_action, lot, comment, slave_id_src, slave_ticket, instance_id),
                                     daemon=True,
                                 ).start()
                             continue
@@ -595,12 +666,11 @@ def main():
         else:
             send_status(sock, "error", msg)
             try:
-                while True:
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                pass
-            finally:
                 sock.close()
+            except Exception:
+                pass
+            with mt5_lock:
+                mt5.shutdown()
             time.sleep(backoff)
             continue
 

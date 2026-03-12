@@ -691,6 +691,9 @@ app.post('/api/command', (req, res) => {
     if (master.status !== 'active') {
         return res.status(403).json({ error: 'Master account is not active — activate it first' });
     }
+    if (normalizeMasterMode(master.mode) !== 'manual') {
+        return res.status(403).json({ error: 'Master account is in automated mode — switch it to manual first' });
+    }
 
     let payload;
 
