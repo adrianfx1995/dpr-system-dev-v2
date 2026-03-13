@@ -311,7 +311,9 @@ def start_slave_position_monitor(sock, slave_id, master_id, instance_id, stop_ev
         while not stop_event.wait(2):
             try:
                 with mt5_lock:
-                    positions = mt5.positions_get() or []
+                    positions = mt5.positions_get()
+                if positions is None:
+                    continue  # MT5 glitch — skip, don't report false volume drops
                 current_volumes = {}  # {int(masterTicket): slave copied volume}
                 for p in positions:
                     comment = getattr(p, "comment", "") or ""
@@ -386,6 +388,14 @@ def reconcile_copy_positions(master_positions, instance_id):
     with _state_lock:
         new_map = {int(t): float(v) for t, v in master_positions.items()}
         old_map = _last_master_positions
+
+        # Safety guard: if snapshot suddenly shows 0 positions but we previously
+        # knew master had open positions, this is almost certainly an MT5 API glitch
+        # on the master side. Skip the stale-close to prevent false closures.
+        # Individual op:close signals handle legitimate closes in real time.
+        if len(new_map) == 0 and len(old_map) > 0:
+            print(f"[{instance_id}] RECONCILE_SKIP empty snapshot while master had {len(old_map)} known positions — MT5 glitch guard")
+            return
         for ticket, old_volume in old_map.items():
             new_volume = float(new_map.get(ticket, 0.0))
             reduced_on_master = round(float(old_volume) - new_volume, 8)
@@ -408,7 +418,10 @@ def reconcile_copy_positions(master_positions, instance_id):
 
     with mt5_lock:
         keep = {int(t): float(v) for t, v in master_positions.items()}
-        positions = mt5.positions_get() or []
+        positions = mt5.positions_get()
+        if positions is None:
+            print(f"[{instance_id}] RECONCILE_SKIP positions_get() returned None — MT5 glitch guard")
+            return
         stale = []
         excess = []
         for p in positions:

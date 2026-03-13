@@ -503,7 +503,14 @@ def start_reverse_copy_monitor(sock, stop_event, instance_id, master_id):
         while not stop_event.wait(2):
             try:
                 with mt5_lock:
-                    positions = mt5.positions_get() or []
+                    positions = mt5.positions_get()
+
+                # If MT5 API returned None (error, not empty), skip this cycle entirely.
+                # Sending an empty snapshot when MT5 glitches would cause slaves to
+                # close all their copies thinking master closed everything.
+                if positions is None:
+                    print(f"[{instance_id}] positions_get() returned None — skipping cycle (MT5 glitch guard)")
+                    continue
 
                 current = {}
                 for p in positions:
