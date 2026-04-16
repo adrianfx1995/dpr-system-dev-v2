@@ -528,11 +528,11 @@ def process_command(line, symbol, instance_id, master_id):
             print(f"[{instance_id}] COPY_BAD masterTicket missing: {data}")
             return
         if op == "open":
-            copy_symbol = data.get("symbol") or symbol
+            # Always use slave's own configured symbol — master may use a different suffix
             copy_action = (data.get("action") or "").upper()
             copy_lot = float(data.get("lot") or lot or 0.01)
             if copy_action in ("BUY", "SELL"):
-                execute_copy_open(copy_symbol, copy_action, copy_lot, master_ticket, instance_id)
+                execute_copy_open(symbol, copy_action, copy_lot, master_ticket, instance_id)
             return
         if op == "close":
             closed = close_copy_by_master_ticket(master_ticket, None, instance_id)

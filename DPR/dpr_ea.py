@@ -41,12 +41,14 @@ def normalize_master(master):
     mt5_path = str(master.get("mt5Path") or "").strip()
     if not mt5_path:
         return None
+    xau_symbol = str(master.get("xauSymbol") or "XAUUSD").strip() or "XAUUSD"
     return {
         "master_id": str(master_id),
         "account": account,
         "password": password,
         "server": server,
         "mt5_path": mt5_path,
+        "xau_symbol": xau_symbol,
     }
 
 
@@ -65,6 +67,8 @@ def build_command(cfg):
         cfg["server"],
         "--mt5-path",
         cfg["mt5_path"],
+        "--symbol",
+        cfg["xau_symbol"],
         "--engine-host",
         ENGINE_HOST,
         "--engine-port",

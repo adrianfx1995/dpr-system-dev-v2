@@ -356,7 +356,7 @@ def close_master_position_by_ticket(ticket, volume_to_close, instance_id):
             print(f"[{instance_id}] SLAVE_CLOSE_FAIL ticket={ticket} vol={close_volume} code={code} {cmt}")
 
 
-def start_listener(sock, stop_event, instance_id):
+def start_listener(sock, stop_event, instance_id, symbol="XAUUSD"):
     def run():
         buffer = ""
         while not stop_event.is_set():
@@ -377,7 +377,7 @@ def start_listener(sock, stop_event, instance_id):
                         if data.get("kind") == "slave_origin_open":
                             slave_id_src = str(data.get("slaveId") or "")
                             slave_ticket = int(data.get("slaveTicket") or 0)
-                            symbol = str(data.get("symbol") or "")
+                            # Always use master's own configured symbol — slave may use a different suffix
                             action = str(data.get("action") or "").upper()
                             lot = float(data.get("lot") or 0.01)
                             hedge_action = "SELL" if action == "BUY" else "BUY"
@@ -425,7 +425,7 @@ def start_listener(sock, stop_event, instance_id):
                         if data.get("kind") == "slave_origin_sync":
                             slave_id_src = str(data.get("slaveId") or "")
                             slave_ticket = int(data.get("slaveTicket") or 0)
-                            symbol = str(data.get("symbol") or "")
+                            # Always use master's own configured symbol — slave may use a different suffix
                             action = str(data.get("action") or "").upper()
                             lot = float(data.get("lot") or 0.0)
                             hedge_action = "SELL" if action == "BUY" else "BUY"
@@ -633,6 +633,7 @@ def parse_args():
     p.add_argument("--password", required=True)
     p.add_argument("--server", required=True)
     p.add_argument("--mt5-path", required=True)
+    p.add_argument("--symbol", default="XAUUSD", help="Exact XAUUSD symbol name on this broker")
     p.add_argument("--engine-host", default="127.0.0.1")
     p.add_argument("--engine-port", type=int, default=9090)
     return p.parse_args()
@@ -682,7 +683,7 @@ def main():
             continue
 
         stop_event = threading.Event()
-        start_listener(sock, stop_event, instance_id)
+        start_listener(sock, stop_event, instance_id, args.symbol)
         start_ping(sock, stop_event, instance_id)
         start_data_sender(sock, stop_event, instance_id)
         start_reverse_copy_monitor(sock, stop_event, instance_id, args.master_id)

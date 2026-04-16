@@ -13,6 +13,7 @@ export interface NewAccountDetails {
   masterPass: string;
   server: string;
   mt5Path: string;
+  xauSymbol: string;
 }
 
 interface TopBarProps {
@@ -24,7 +25,7 @@ interface TopBarProps {
   slaveAccounts: {id: string;name: string;}[];
 }
 
-const emptyForm = { name: "", accountNumber: "", masterPass: "", server: "", mt5Path: "" };
+const emptyForm = { name: "", accountNumber: "", masterPass: "", server: "", mt5Path: "", xauSymbol: "XAUUSD" };
 
 const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveAccount, masterAccounts, slaveAccounts }: TopBarProps) => {
   const [newAccountType, setNewAccountType] = useState<"master" | "slave">("master");
@@ -46,8 +47,9 @@ const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveA
 
   const handleAdd = () => {
     const mt5Path = form.mt5Path.trim();
+    const xauSymbol = form.xauSymbol.trim() || "XAUUSD";
     if (form.name.trim() && form.accountNumber.trim() && form.server.trim() && mt5Path) {
-      onAddAccount({ type: newAccountType, ...form, mt5Path });
+      onAddAccount({ type: newAccountType, ...form, mt5Path, xauSymbol });
       setForm(emptyForm);
       setPathCheck({ status: "idle", message: "" });
       setAddOpen(false);
@@ -199,6 +201,15 @@ const TopBar = ({ totalMasterBalance, totalSlaveBalance, onAddAccount, onRemoveA
                       {pathCheck.status === "checking" ? "Checking..." : "Check Path"}
                     </Button>
                   </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>XAUUSD Symbol Name (on this broker)</Label>
+                  <Input
+                    placeholder="e.g. XAUUSD, XAUUSD!, Gold!"
+                    value={form.xauSymbol}
+                    onChange={setField("xauSymbol")}
+                  />
+                  <p className="text-[11px] text-muted-foreground">Exact symbol name as it appears in MT5 for this account.</p>
                 </div>
                 <Button
                   onClick={handleAdd}

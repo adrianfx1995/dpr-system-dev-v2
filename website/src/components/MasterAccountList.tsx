@@ -23,6 +23,7 @@ export interface MasterAccount {
   status: "active" | "paused";
   mtStatus?: "connected" | "disconnected" | "error" | "connecting";
   mtMessage?: string;
+  xauSymbol?: string;
   slaveCount: number;
   createdAt: string;
   lastUpdated: string;
@@ -87,6 +88,7 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
       masterPass: account.masterPass,
       broker: account.broker,
       mt5Path: account.mt5Path ?? "",
+      xauSymbol: account.xauSymbol ?? "XAUUSD",
     });
     setPathCheck({ status: "idle", message: "" });
   };
@@ -286,6 +288,11 @@ const MasterAccountList = ({ accounts, selectedId, onSelect, onEdit, onActivate,
                   {pathCheck.status === "checking" ? "Checking..." : "Check Path"}
                 </Button>
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>XAUUSD Symbol Name (on this broker)</Label>
+              <Input placeholder="e.g. XAUUSD, XAUUSD!, Gold!" value={form.xauSymbol ?? ""} onChange={setField("xauSymbol")} />
+              <p className="text-[11px] text-muted-foreground">Exact symbol name as it appears in MT5 for this account.</p>
             </div>
             <Button onClick={handleSave} className="w-full" disabled={!String(form.mt5Path || "").trim()}>Save Changes</Button>
           </div>

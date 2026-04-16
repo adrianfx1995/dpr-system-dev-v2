@@ -98,7 +98,7 @@ const Index = () => {
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Failed to remove account"),
   });
 
-  const handleAddAccount = ({ type, name, accountNumber, masterPass, server, mt5Path }: NewAccountDetails) => {
+  const handleAddAccount = ({ type, name, accountNumber, masterPass, server, mt5Path, xauSymbol }: NewAccountDetails) => {
     const id = `${type[0]}${nextIdRef.current++}`;
     const today = new Date().toISOString().split("T")[0];
     const normalizedMt5Path = mt5Path.trim();
@@ -109,6 +109,7 @@ const Index = () => {
         masterPass,
         broker: server,
         mt5Path: normalizedMt5Path,
+        xauSymbol: xauSymbol || "XAUUSD",
         mode: "manual",
         currency: "USD",
         balance: 0, equity: 0, margin: 0, freeMargin: 0,
@@ -125,6 +126,7 @@ const Index = () => {
         masterPass,
         broker: server,
         mt5Path: normalizedMt5Path,
+        xauSymbol: xauSymbol || "XAUUSD",
         currency: "USD",
         masterId,
         balance: 0, equity: 0,
@@ -249,7 +251,7 @@ const Index = () => {
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
+    <div className="h-[100dvh] flex flex-col overflow-hidden">
       <TopBar
         totalMasterBalance={totalMasterBalance}
         totalSlaveBalance={totalSlaveBalance}
@@ -282,7 +284,7 @@ const Index = () => {
       )}
 
       <div className="flex-1 flex flex-col sm:flex-row overflow-hidden">
-        <div className="w-full h-[40vh] sm:h-full sm:w-[240px] lg:w-[340px] flex-shrink-0 border-b sm:border-b-0 sm:border-r border-border">
+        <div className="w-full h-[35dvh] sm:h-full sm:w-[240px] lg:w-[340px] flex-shrink-0 border-b sm:border-b-0 sm:border-r border-border overflow-y-auto">
           <MasterAccountList
             accounts={masters}
             selectedId={selectedMasterId}
